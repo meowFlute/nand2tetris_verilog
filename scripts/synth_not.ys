@@ -1,0 +1,12 @@
+# 1. Read source files
+read_verilog rtl/nand_gate.v rtl/not_gate.v
+
+# 2. Select top-level
+hierarchy -top not_gate
+
+# 3. Cleanup procedural blocks
+proc
+opt_clean
+
+# 4. Show schematic preserving the black-box nand_gate
+show -notitle -colors 2 -stretch not_gate
