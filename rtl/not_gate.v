@@ -3,10 +3,6 @@ module not_gate (
 	output wire out
 );
 
-	nand_gate primitive_nand (
-		in,
-		in,
-		out
-	);
+	nand_gate primitive_nand (.out(out), .a(in), .b(in));
 
 endmodule
