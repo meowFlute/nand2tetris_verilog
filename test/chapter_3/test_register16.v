@@ -27,12 +27,12 @@ module test_register16;
             test_in = in_val;
             test_load = load_val;
             #5;
-            $display("%0t | %b | %h | %b | %h", $time, test_clk, test_in, test_load, test_out);
+            //$display("%0t | %b | %h | %b | %h", $time, test_clk, test_in, test_load, test_out);
 
             // Rising clock edge captures the inputs
             test_clk = 1'b1;
             #1;
-            $display("%0t | %b | %h | %b | %h", $time, test_clk, test_in, test_load, test_out);
+            //$display("%0t | %b | %h | %b | %h", $time, test_clk, test_in, test_load, test_out);
             if (test_out !== expected_out) begin
                 $display("[FAIL @ %0t] after posedge: in=%h load=%b expected_out=%h got=%h",
                          $time, test_in, test_load, expected_out, test_out);
@@ -41,11 +41,11 @@ module test_register16;
 
             // Mutate inputs while clock is high; outputs must hold
             #4;
-            $display("%0t | %b | %h | %b | %h", $time, test_clk, test_in, test_load, test_out);
+            //$display("%0t | %b | %h | %b | %h", $time, test_clk, test_in, test_load, test_out);
             test_in = ~in_val;
             test_load = ~load_val;
             #2;
-            $display("%0t | %b | %h | %b | %h", $time, test_clk, test_in, test_load, test_out);
+            //$display("%0t | %b | %h | %b | %h", $time, test_clk, test_in, test_load, test_out);
             if (test_out !== expected_out) begin
                 $display("[FAIL @ %0t] during clk=1 hold: in=%h load=%b expected_out=%h got=%h",
                          $time, test_in, test_load, expected_out, test_out);

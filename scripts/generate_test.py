@@ -10,6 +10,7 @@ Usage:
     scripts/generate_test.py dff -s                         # clock-driven: tick_and_check task, 4 blank cycles
     scripts/generate_test.py register -s -n 8               # clock-driven with 8 blank cycles
     scripts/generate_test.py foo -s --clock-name clock      # point out the clock input name explicitly
+    scripts/generate_test.py ram8 -s --address-name addr    # hold the address steady during the clk=1 mutation
 
 The chapter is taken from where the module lives: rtl/chapter_N/<module>.v
 produces test/chapter_N/test_<module>.v. Expected values (and, in sampled
@@ -263,7 +264,8 @@ def render(module, ports, num_cases):
     add("endmodule")
     return "\n".join(L) + "\n"
 
-def render_sequential(module, ports, clock, num_cases, pre_edge_check=False):
+def render_sequential(module, ports, clock, num_cases, pre_edge_check=False,
+                      static_inputs=()):
     """Bench for clock-driven modules: one tick_and_check call per clock cycle."""
     ins = [p for p in ports if p.direction == "input" and p.name != clock]
     outs = [p for p in ports if p.direction == "output"]
@@ -339,10 +341,13 @@ def render_sequential(module, ports, clock, num_cases, pre_edge_check=False):
     row(f"{T}{T}{T}")
     fail_check(f"{T}{T}{T}", "after posedge")
     add("")
-    add(f"{T}{T}{T}// Mutate inputs while clock is high; outputs must hold")
+    note = f" ({', '.join(static_inputs)} held steady)" if static_inputs else ""
+    add(f"{T}{T}{T}// Mutate inputs while clock is high; outputs must hold{note}")
     add(f"{T}{T}{T}#4;")
     row(f"{T}{T}{T}")
     for p in ins:
+        if p.name in static_inputs:
+            continue
         add(f"{T}{T}{T}test_{p.name} = ~{p.name}_val;")
     add(f"{T}{T}{T}#2;")
     row(f"{T}{T}{T}")
@@ -414,6 +419,10 @@ def main(argv=None):
                     help="clock-driven module: emit a tick_and_check bench instead of a truth table")
     ap.add_argument("--clock-name", default="clk", metavar="NAME",
                     help="name of the clock input in sequential mode (default: clk)")
+    ap.add_argument("--address-name", default=None, metavar="NAME",
+                    help="sequential mode: name of an address input to hold steady during the "
+                         "clk=1 mutation phase, for chips with combinational reads like RAM "
+                         "(default: auto-detects an input named 'address')")
     ap.add_argument("--pre-edge-check", action="store_true",
                     help="sequential mode: also assert outputs are unchanged before the clock edge "
                          "(skip for chips with combinational outputs, e.g. RAM reads)")
@@ -435,6 +444,9 @@ def main(argv=None):
     if args.pre_edge_check and not args.sequential:
         ap.error("--pre-edge-check only applies with -s/--sequential")
 
+    if args.address_name and not args.sequential:
+        ap.error("--address-name only applies with -s/--sequential")
+
     if args.sequential:
         clk = next((p for p in ports if p.name == args.clock_name and p.direction == "input"), None)
         if clk is None:
@@ -442,8 +454,18 @@ def main(argv=None):
                      f"use --clock-name")
         if clk.width != 1:
             sys.exit(f"error: clock {args.clock_name!r} must be 1 bit wide")
+        static_inputs = []
+        addr_name = args.address_name or "address"
+        addr = next((p for p in ports if p.name == addr_name and p.direction == "input"), None)
+        if addr is None and args.address_name:
+            sys.exit(f"error: {src_path.name} has no input named {args.address_name!r}; "
+                     f"check --address-name")
+        if addr is not None and addr.name != args.clock_name:
+            static_inputs.append(addr.name)
+
         n = args.num_cases or DEFAULT_SEQ_CASES
-        text = render_sequential(module, ports, args.clock_name, n, args.pre_edge_check)
+        text = render_sequential(module, ports, args.clock_name, n,
+                                 args.pre_edge_check, static_inputs)
     else:
         in_bits = sum(p.width for p in ports if p.direction == "input")
         if args.num_cases is None and in_bits > MAX_EXHAUSTIVE_INPUT_BITS:
