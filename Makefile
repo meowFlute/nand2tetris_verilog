@@ -70,20 +70,14 @@ stats:
 
 show:
 ifeq ($(TOP),)
-	@PS3="Module to view: "; \
-	select m in $(MODULES); do \
-		[ -n "$$m" ] && $(MAKE) --no-print-directory show TOP=$$m; break; \
-	done
+	@m=$$(scripts/pick_module.sh $(RTL_ROOT)) && $(MAKE) --no-print-directory show TOP=$$m
 else
 	PYTHONWARNINGS=ignore yosys -p "$(call ys_read,$(TOP)); $(YS_FLAT); stat; show -notitle -stretch $(TOP)"
 endif
 
 svg:
 ifeq ($(TOP),)
-	@PS3="Module to view: "; \
-	select m in $(MODULES); do \
-		[ -n "$$m" ] && $(MAKE) --no-print-directory svg TOP=$$m; break; \
-	done
+	@m=$$(scripts/pick_module.sh $(RTL_ROOT)) && $(MAKE) --no-print-directory svg TOP=$$m
 else
 	@mkdir -p $(BUILD_DIR)
 	PYTHONWARNINGS=ignore yosys -q -p "$(call ys_read,$(TOP)); $(YS_FLAT); show -format svg -viewer none -prefix $(BUILD_DIR)/$(TOP)"
