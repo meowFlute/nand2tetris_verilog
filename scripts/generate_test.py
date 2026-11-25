@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
-"""Generate a Verilog test harness skeleton for a module in rtl/.
+
+"""Generate a Verilog test harness skeleton for a module in rtl/chapter_*/.
 
 Usage:
     scripts/generate_test.py and_gate          # full truth table, blank expected values
-    scripts/generate_test.py                   # pick list built from rtl/ and test/
+    scripts/generate_test.py                   # pick list of every module in every chapter
+    scripts/generate_test.py -c 2              # pick list limited to chapter_2
     scripts/generate_test.py alu -n 20         # 20 fully blank cases (for wide buses)
 
-The generated file goes to test/test_<module>.v. Expected values (and, in
-sampled mode, the inputs too) are left blank so the file won't compile until
-you fill them in.
+The chapter is taken from where the module lives: rtl/chapter_N/<module>.v
+produces test/chapter_N/test_<module>.v. Expected values (and, in sampled
+mode, the inputs too) are left blank so the file won't compile until you
+fill them in.
 """
 
 import argparse
@@ -76,29 +79,68 @@ def parse_ports(source, module_name):
 
 # -------------------------------------------------------- module selection
 
-def list_modules(rtl_dir):
-    return sorted(p.stem for p in rtl_dir.glob("*.v"))
+def natural_key(s):
+    """Sort chapter_2 before chapter_10."""
+    return [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", s)]
 
 
-def choose_module(rtl_dir, test_dir):
-    names = list_modules(rtl_dir)
-    if not names:
-        sys.exit(f"error: no .v files found in {rtl_dir}")
+def chapter_matches(dir_name, wanted):
+    """wanted may be None, a bare number ("2"), or a dir name ("chapter_2")."""
+    if wanted is None:
+        return True
+    if wanted.isdigit():
+        m = re.fullmatch(r"chapter_(\d+)", dir_name)
+        return bool(m) and int(m.group(1)) == int(wanted)
+    return dir_name == wanted
+
+
+def find_modules(rtl_dir, chapter=None):
+    """Return [(chapter_dir_name, module_name, path)], sorted by chapter then name."""
+    found = [
+        (p.parent.name, p.stem, p)
+        for p in rtl_dir.glob("chapter_*/*.v")
+        if chapter_matches(p.parent.name, chapter)
+    ]
+    return sorted(found, key=lambda t: (natural_key(t[0]), t[1]))
+
+
+def choose_module(rtl_dir, test_dir, chapter=None):
+    entries = find_modules(rtl_dir, chapter)
+    if not entries:
+        where = f"chapter {chapter}" if chapter else "rtl/chapter_*"
+        sys.exit(f"error: no .v files found for {where} under {rtl_dir}")
     if not sys.stdin.isatty():
         sys.exit("error: no module given and stdin is not interactive")
 
-    print("Modules in rtl/:")
-    for i, name in enumerate(names, 1):
-        status = "test exists" if (test_dir / f"test_{name}.v").exists() else "no test yet"
-        print(f"  {i:2d}) {name:<24} [{status}]")
+    print("Modules:")
+    current = None
+    for i, (ch, name, _) in enumerate(entries, 1):
+        if ch != current:
+            print(f"  {ch}/")
+            current = ch
+        status = "test exists" if (test_dir / ch / f"test_{name}.v").exists() else "no test yet"
+        print(f"    {i:2d}) {name:<24} [{status}]")
     choice = input("Pick a number or name: ").strip()
 
-    if choice.isdigit() and 1 <= int(choice) <= len(names):
-        return names[int(choice) - 1]
-    if choice in names:
-        return choice
+    if choice.isdigit() and 1 <= int(choice) <= len(entries):
+        return entries[int(choice) - 1]
+    matches = [e for e in entries if e[1] == choice]
+    if len(matches) == 1:
+        return matches[0]
+    if len(matches) > 1:
+        sys.exit(f"error: {choice!r} exists in several chapters; pick by number")
     sys.exit(f"error: invalid selection {choice!r}")
 
+
+def resolve_module(rtl_dir, module, chapter=None):
+    matches = [e for e in find_modules(rtl_dir, chapter) if e[1] == module]
+    if not matches:
+        sys.exit(f"error: no {module}.v found under {rtl_dir}/chapter_*"
+                 + (f" matching chapter {chapter}" if chapter else ""))
+    if len(matches) > 1:
+        chapters = ", ".join(e[0] for e in matches)
+        sys.exit(f"error: {module}.v exists in multiple chapters ({chapters}); use -c to choose")
+    return matches[0]
 
 # --------------------------------------------------------------- rendering
 
@@ -221,6 +263,8 @@ def render(module, ports, num_cases):
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("module", nargs="?", help="module name, e.g. and_gate (omit for a pick list)")
+    ap.add_argument("-c", "--chapter", metavar="N",
+                    help="limit to one chapter (e.g. 2 or chapter_2); mainly useful for the pick list")
     ap.add_argument("-n", "--num-cases", type=int, metavar="N",
                     help="skip the full permutation; emit N fully blank cases (for wide buses)")
     ap.add_argument("-f", "--force", action="store_true", help="overwrite an existing test file")
@@ -231,10 +275,10 @@ def main(argv=None):
     if args.num_cases is not None and args.num_cases < 1:
         ap.error("--num-cases must be at least 1")
 
-    module = args.module or choose_module(args.rtl_dir, args.test_dir)
-    src_path = args.rtl_dir / f"{module}.v"
-    if not src_path.exists():
-        sys.exit(f"error: {src_path} not found")
+    if args.module:
+        chapter_name, module, src_path = resolve_module(args.rtl_dir, args.module, args.chapter)
+    else:
+        chapter_name, module, src_path = choose_module(args.rtl_dir, args.test_dir, args.chapter)
 
     try:
         ports = parse_ports(src_path.read_text(), module)
@@ -246,15 +290,15 @@ def main(argv=None):
         sys.exit(f"error: {in_bits} input bits means {2 ** in_bits} permutations; "
                  f"use -n N to generate N blank cases instead")
 
-    out_path = args.test_dir / f"test_{module}.v"
+    out_path = args.test_dir / chapter_name / f"test_{module}.v"
     if out_path.exists() and not args.force:
         sys.exit(f"error: {out_path} already exists (use --force to overwrite)")
 
-    args.test_dir.mkdir(parents=True, exist_ok=True)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(render(module, ports, args.num_cases))
     print(f"wrote {out_path.relative_to(REPO_ROOT) if out_path.is_relative_to(REPO_ROOT) else out_path}")
     return 0
 
-
+# main function to run from command-line input
 if __name__ == "__main__":
     sys.exit(main())
