@@ -27,9 +27,9 @@ module test_dmux;
             test_sel = sel_val;
             #10;
 
-            $display("%4t | %b | %b | %b | %b", $time, test_in, test_sel, test_a, test_b);
+            $display("%0t | %b | %b | %b | %b", $time, test_in, test_sel, test_a, test_b);
             if (test_a !== expected_a || test_b !== expected_b) begin
-                $display("[FAIL] in: %b | sel: %b | Expected a: %b | Got: %b | Expected b: %b | Got: %b", test_in, test_sel, expected_a, test_a, expected_b, test_b);
+                $display("[FAIL @ %0t] in: %b | sel: %b | Expected a: %b | Got: %b | Expected b: %b | Got: %b", $time, test_in, test_sel, expected_a, test_a, expected_b, test_b);
                 error_occurred = 1;
             end
         end
@@ -37,6 +37,7 @@ module test_dmux;
 
     // actual code running the tasks to do the test cases
     initial begin
+        $timeformat(-9, 0, " ns", 8);
         // Print the header for the results table
         $display("Time | in | sel | a | b");
         $display("-----------------------");

@@ -28,9 +28,9 @@ module test_mux;
             test_sel = sel_val;
             #10;
 
-            $display("%4t | %b | %b | %b | %b", $time, test_a, test_b, test_sel, test_out);
+            $display("%0t | %b | %b | %b | %b", $time, test_a, test_b, test_sel, test_out);
             if (test_out !== expected_out) begin
-                $display("[FAIL] a: %b | b: %b | sel: %b | Expected out: %b | Got: %b", test_a, test_b, test_sel, expected_out, test_out);
+                $display("[FAIL @ %0t] a: %b | b: %b | sel: %b | Expected out: %b | Got: %b", $time, test_a, test_b, test_sel, expected_out, test_out);
                 error_occurred = 1;
             end
         end
@@ -38,6 +38,7 @@ module test_mux;
 
     // actual code running the tasks to do the test cases
     initial begin
+        $timeformat(-9, 0, " ns", 8);
         // Print the header for the results table
         $display("Time | a | b | sel | out");
         $display("------------------------");

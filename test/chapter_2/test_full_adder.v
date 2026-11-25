@@ -31,9 +31,9 @@ module test_full_adder;
             test_c = c_val;
             #10;
 
-            $display("%4t | %b | %b | %b | %b | %b", $time, test_a, test_b, test_c, test_sum, test_carry);
+            $display("%0t | %b | %b | %b | %b | %b", $time, test_a, test_b, test_c, test_sum, test_carry);
             if (test_sum !== expected_sum || test_carry !== expected_carry) begin
-                $display("[FAIL] a: %b | b: %b | c: %b | Expected sum: %b | Got: %b | Expected carry: %b | Got: %b", test_a, test_b, test_c, expected_sum, test_sum, expected_carry, test_carry);
+                $display("[FAIL @ %0t] a: %b | b: %b | c: %b | Expected sum: %b | Got: %b | Expected carry: %b | Got: %b", $time, test_a, test_b, test_c, expected_sum, test_sum, expected_carry, test_carry);
                 error_occurred = 1;
             end
         end
@@ -41,6 +41,7 @@ module test_full_adder;
 
     // actual code running the tasks to do the test cases
     initial begin
+        $timeformat(-9, 0, " ns", 8);
         // Print the header for the results table
         $display("Time | a | b | c | sum | carry");
         $display("------------------------------");

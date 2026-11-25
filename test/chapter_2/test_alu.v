@@ -54,9 +54,9 @@ module test_alu;
             test_no = no_val;
             #10;
 
-            $display("%4t | %h | %h | %b | %b | %b | %b | %b | %b | %h | %b | %b", $time, test_x, test_y, test_zx, test_nx, test_zy, test_ny, test_f, test_no, test_out, test_zr, test_ng);
+            $display("%0t | %h | %h | %b | %b | %b | %b | %b | %b | %h | %b | %b", $time, test_x, test_y, test_zx, test_nx, test_zy, test_ny, test_f, test_no, test_out, test_zr, test_ng);
             if (test_out !== expected_out || test_zr !== expected_zr || test_ng !== expected_ng) begin
-                $display("[FAIL] x: %h | y: %h | zx: %b | nx: %b | zy: %b | ny: %b | f: %b | no: %b | Expected out: %h | Got: %h | Expected zr: %b | Got: %b | Expected ng: %b | Got: %b", test_x, test_y, test_zx, test_nx, test_zy, test_ny, test_f, test_no, expected_out, test_out, expected_zr, test_zr, expected_ng, test_ng);
+                $display("[FAIL @ %0t] x: %h | y: %h | zx: %b | nx: %b | zy: %b | ny: %b | f: %b | no: %b | Expected out: %h | Got: %h | Expected zr: %b | Got: %b | Expected ng: %b | Got: %b", $time, test_x, test_y, test_zx, test_nx, test_zy, test_ny, test_f, test_no, expected_out, test_out, expected_zr, test_zr, expected_ng, test_ng);
                 error_occurred = 1;
             end
         end
@@ -64,6 +64,7 @@ module test_alu;
 
     // actual code running the tasks to do the test cases
     initial begin
+        $timeformat(-9, 0, " ns", 8);
         // Print the header for the results table
         $display("Time | x | y | zx | nx | zy | ny | f | no | out | zr | ng");
         $display("---------------------------------------------------------");

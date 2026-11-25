@@ -24,9 +24,9 @@ module test_or_gate;
             test_b = b_val;
             #10;
 
-            $display("%4t | %b | %b | %b", $time, test_a, test_b, test_out);
+            $display("%0t | %b | %b | %b", $time, test_a, test_b, test_out);
             if (test_out !== expected_out) begin
-                $display("[FAIL] a: %b | b: %b | Expected out: %b | Got: %b", test_a, test_b, expected_out, test_out);
+                $display("[FAIL @ %0t] a: %b | b: %b | Expected out: %b | Got: %b", $time, test_a, test_b, expected_out, test_out);
                 error_occurred = 1;
             end
         end
@@ -34,6 +34,7 @@ module test_or_gate;
 
     // actual code running the tasks to do the test cases
     initial begin
+        $timeformat(-9, 0, " ns", 8);
         // Print the header for the results table
         $display("Time | a | b | out");
         $display("------------------");

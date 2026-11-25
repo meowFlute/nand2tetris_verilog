@@ -3,10 +3,13 @@
 """Generate a Verilog test harness skeleton for a module in rtl/chapter_*/.
 
 Usage:
-    scripts/generate_test.py and_gate          # full truth table, blank expected values
-    scripts/generate_test.py                   # pick list of every module in every chapter
-    scripts/generate_test.py -c 2              # pick list limited to chapter_2
-    scripts/generate_test.py alu -n 20         # 20 fully blank cases (for wide buses)
+    scripts/generate_test.py and_gate                       # full truth table, blank expected values
+    scripts/generate_test.py                                # pick list of every module in every chapter
+    scripts/generate_test.py -c 2                           # pick list limited to chapter_2
+    scripts/generate_test.py alu -n 20                      # 20 fully blank cases (for wide buses)
+    scripts/generate_test.py dff -s                         # clock-driven: tick_and_check task, 4 blank cycles
+    scripts/generate_test.py register -s -n 8               # clock-driven with 8 blank cycles
+    scripts/generate_test.py foo -s --clock-name clock      # point out the clock input name explicitly
 
 The chapter is taken from where the module lives: rtl/chapter_N/<module>.v
 produces test/chapter_N/test_<module>.v. Expected values (and, in sampled
@@ -23,6 +26,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 MAX_EXHAUSTIVE_INPUT_BITS = 10  # 1024 cases; beyond this, require -n
+DEFAULT_SEQ_CASES = 4           # in sequential cases a truth table doesn't make much sense, 
+                                # so by default it'll generate 4 tick and check cases 
 
 
 @dataclass
@@ -163,7 +168,6 @@ def plain(value, width):
         return f"{value:0{width}b}"
     return f"{value:0{(width + 3) // 4}x}"
 
-
 def render(module, ports, num_cases):
     ins = [p for p in ports if p.direction == "input"]
     outs = [p for p in ports if p.direction == "output"]
@@ -202,7 +206,7 @@ def render(module, ports, num_cases):
     add("")
     row_fmt = " | ".join(disp_fmt(p.width) for p in ins + outs)
     row_args = ", ".join(f"test_{p.name}" for p in ins + outs)
-    add(f'{T}{T}{T}$display("%4t | {row_fmt}", $time, {row_args});')
+    add(f'{T}{T}{T}$display("%0t | {row_fmt}", $time, {row_args});')
     cond = " || ".join(f"test_{p.name} !== expected_{p.name}" for p in outs)
     add(f"{T}{T}{T}if ({cond}) begin")
     fail_fmt = " | ".join(f"{p.name}: {disp_fmt(p.width)}" for p in ins)
@@ -210,10 +214,11 @@ def render(module, ports, num_cases):
         f"Expected {p.name}: {disp_fmt(p.width)} | Got: {disp_fmt(p.width)}" for p in outs
     )
     fail_args = ", ".join(
-        [f"test_{p.name}" for p in ins]
+        ["$time"]
+        + [f"test_{p.name}" for p in ins]
         + [a for p in outs for a in (f"expected_{p.name}", f"test_{p.name}")]
     )
-    add(f'{T}{T}{T}{T}$display("[FAIL] {fail_fmt}", {fail_args});')
+    add(f'{T}{T}{T}{T}$display("[FAIL @ %0t] {fail_fmt}", {fail_args});')
     add(f"{T}{T}{T}{T}error_occurred = 1;")
     add(f"{T}{T}{T}end")
     add(f"{T}{T}end")
@@ -224,6 +229,7 @@ def render(module, ports, num_cases):
     header = "Time | " + " | ".join(p.name for p in ins + outs)
     add(f"{T}// actual code running the tasks to do the test cases")
     add(f"{T}initial begin")
+    add(f'{T}{T}$timeformat(-9, 0, " ns", 8);')
     add(f"{T}{T}// Print the header for the results table")
     add(f'{T}{T}$display("{header}");')
     add(f'{T}{T}$display("{"-" * len(header)}");')
@@ -257,6 +263,140 @@ def render(module, ports, num_cases):
     add("endmodule")
     return "\n".join(L) + "\n"
 
+def render_sequential(module, ports, clock, num_cases, pre_edge_check=False):
+    """Bench for clock-driven modules: one tick_and_check call per clock cycle."""
+    ins = [p for p in ports if p.direction == "input" and p.name != clock]
+    outs = [p for p in ports if p.direction == "output"]
+    T = "    "
+    L = []
+    add = L.append
+
+    row_cols = [clock] + [p.name for p in ins + outs]
+    row_fmt = " | ".join(["%b"] + [disp_fmt(p.width) for p in ins + outs])
+    row_args = ", ".join(f"test_{n}" for n in row_cols)
+
+    def row(indent):
+        add(f'{indent}$display("%0t | {row_fmt}", $time, {row_args});')
+
+    def fail_check(indent, label, ref="expected_"):
+        cond = " || ".join(f"test_{p.name} !== {ref}{p.name}" for p in outs)
+        fmt = f"[FAIL @ %0t] {label}:"
+        args = ["$time"]
+        if ins:
+            fmt += " " + " ".join(f"{p.name}={disp_fmt(p.width)}" for p in ins)
+            args += [f"test_{p.name}" for p in ins]
+        fmt += " " + " ".join(
+            f"{ref}{p.name}={disp_fmt(p.width)} got={disp_fmt(p.width)}" for p in outs
+        )
+        args += [a for p in outs for a in (f"{ref}{p.name}", f"test_{p.name}")]
+        add(f"{indent}if ({cond}) begin")
+        add(f'{indent}{T}$display("{fmt}",')
+        add(f'{indent}{T}         {", ".join(args)});')
+        add(f"{indent}{T}error_occurred = 1;")
+        add(f"{indent}end")
+
+    add("`timescale 1ns / 1ps")
+    add("")
+    add(f"module test_{module};")
+    add(f"{T}// test signals")
+    add(f"{T}reg test_{clock};")
+    for p in ins:
+        add(f"{T}reg {decl(p.width)}test_{p.name};")
+    for p in outs:
+        add(f"{T}wire {decl(p.width)}test_{p.name};")
+    add(f"{T}reg error_occurred = 0;")
+    if pre_edge_check:
+        add(f"{T}// last output values we verified; outputs must not move before the next edge")
+        for p in outs:
+            add(f"{T}reg {decl(p.width)}prev_{p.name};")
+    add("")
+    add(f"{T}// instantiate the device under test and wire it to the bench signals")
+    add(f"{T}{module} dut (")
+    add(",\n".join(f"{T}{T}.{p.name}(test_{p.name})" for p in ports))
+    add(f"{T});")
+    add("")
+
+    add(f"{T}// one full clock cycle: set up inputs, rising edge, check, perturb, check, fall")
+    add(f"{T}task tick_and_check;")
+    for p in ins:
+        add(f"{T}{T}input {decl(p.width)}{p.name}_val;")
+    for p in outs:
+        add(f"{T}{T}input {decl(p.width)}expected_{p.name};")
+    add(f"{T}{T}begin")
+    add(f"{T}{T}{T}// Set up data while clock is low")
+    add(f"{T}{T}{T}test_{clock} = 1'b0;")
+    for p in ins:
+        add(f"{T}{T}{T}test_{p.name} = {p.name}_val;")
+    add(f"{T}{T}{T}#5;")
+    row(f"{T}{T}{T}")
+    if pre_edge_check:
+        add(f"{T}{T}{T}// Outputs must still hold the previous state: no edge has happened yet")
+        fail_check(f"{T}{T}{T}", "before posedge", ref="prev_")
+    add("")
+    add(f"{T}{T}{T}// Rising clock edge captures the inputs")
+    add(f"{T}{T}{T}test_{clock} = 1'b1;")
+    add(f"{T}{T}{T}#1;")
+    row(f"{T}{T}{T}")
+    fail_check(f"{T}{T}{T}", "after posedge")
+    add("")
+    add(f"{T}{T}{T}// Mutate inputs while clock is high; outputs must hold")
+    add(f"{T}{T}{T}#4;")
+    row(f"{T}{T}{T}")
+    for p in ins:
+        add(f"{T}{T}{T}test_{p.name} = ~{p.name}_val;")
+    add(f"{T}{T}{T}#2;")
+    row(f"{T}{T}{T}")
+    fail_check(f"{T}{T}{T}", "during clk=1 hold")
+    add("")
+    add(f"{T}{T}{T}// Return clock low")
+    add(f"{T}{T}{T}test_{clock} = 1'b0;")
+    add(f"{T}{T}{T}#3;")
+    row(f"{T}{T}{T}")
+    if pre_edge_check:
+        add("")
+        for p in outs:
+            add(f"{T}{T}{T}prev_{p.name} = expected_{p.name};")
+    add(f"{T}{T}end")
+    add(f"{T}endtask")
+    add("")
+
+    header = "Time | " + " | ".join(row_cols)
+    add(f"{T}// actual code running the tasks to do the test cases")
+    add(f"{T}initial begin")
+    add(f"{T}{T}$timeformat(-9, 0, \" ns\", 8);")
+    add(f"{T}{T}// Print the header for the results table")
+    add(f'{T}{T}$display("{header}");')
+    add(f'{T}{T}$display("{"-" * len(header)}");')
+    add(f"{T}{T}test_{clock} = 1'b0;")
+    for p in ins:
+        add(f"{T}{T}test_{p.name} = {p.width}'d0;")
+    add(f"{T}{T}#5;")
+    row(f"{T}{T}")
+    if pre_edge_check:
+        add(f"{T}{T}// Whatever the power-up value is (X or 0), treat it as the baseline")
+        for p in outs:
+            add(f"{T}{T}prev_{p.name} = test_{p.name};")
+    add("")
+
+    sig = ", ".join([f"{p.name}" for p in ins] + [f"expected_{p.name}" for p in outs])
+    add(f"{T}{T}// Fill in one call per clock cycle: tick_and_check({sig})")
+    add(f"{T}{T}// Outputs are X until the first edge, and state carries over between calls.")
+    blanks = ", ".join([""] * (len(ins) + len(outs)))
+    for n in range(1, num_cases + 1):
+        add(f"{T}{T}tick_and_check({blanks}); // Cycle {n}")
+    add("")
+
+    title = module.replace("_", " ").upper()
+    add(f"{T}{T}if (error_occurred) begin")
+    add(f'{T}{T}{T}$display("--> {title} TEST: FAILED");')
+    add(f"{T}{T}{T}$finish(1);")
+    add(f"{T}{T}end else begin")
+    add(f'{T}{T}{T}$display("--> {title} TEST: PASSED");')
+    add(f"{T}{T}{T}$finish(0);")
+    add(f"{T}{T}end")
+    add(f"{T}end")
+    add("endmodule")
+    return "\n".join(L) + "\n"
 
 # -------------------------------------------------------------------- main
 
@@ -270,6 +410,13 @@ def main(argv=None):
     ap.add_argument("-f", "--force", action="store_true", help="overwrite an existing test file")
     ap.add_argument("--rtl-dir", type=Path, default=REPO_ROOT / "rtl")
     ap.add_argument("--test-dir", type=Path, default=REPO_ROOT / "test")
+    ap.add_argument("-s", "--sequential", "--clocked", dest="sequential", action="store_true",
+                    help="clock-driven module: emit a tick_and_check bench instead of a truth table")
+    ap.add_argument("--clock-name", default="clk", metavar="NAME",
+                    help="name of the clock input in sequential mode (default: clk)")
+    ap.add_argument("--pre-edge-check", action="store_true",
+                    help="sequential mode: also assert outputs are unchanged before the clock edge "
+                         "(skip for chips with combinational outputs, e.g. RAM reads)")
     args = ap.parse_args(argv)
 
     if args.num_cases is not None and args.num_cases < 1:
@@ -285,17 +432,31 @@ def main(argv=None):
     except ValueError as e:
         sys.exit(f"error: {src_path.name}: {e}")
 
-    in_bits = sum(p.width for p in ports if p.direction == "input")
-    if args.num_cases is None and in_bits > MAX_EXHAUSTIVE_INPUT_BITS:
-        sys.exit(f"error: {in_bits} input bits means {2 ** in_bits} permutations; "
-                 f"use -n N to generate N blank cases instead")
+    if args.pre_edge_check and not args.sequential:
+        ap.error("--pre-edge-check only applies with -s/--sequential")
+
+    if args.sequential:
+        clk = next((p for p in ports if p.name == args.clock_name and p.direction == "input"), None)
+        if clk is None:
+            sys.exit(f"error: {src_path.name} has no input named {args.clock_name!r}; "
+                     f"use --clock-name")
+        if clk.width != 1:
+            sys.exit(f"error: clock {args.clock_name!r} must be 1 bit wide")
+        n = args.num_cases or DEFAULT_SEQ_CASES
+        text = render_sequential(module, ports, args.clock_name, n, args.pre_edge_check)
+    else:
+        in_bits = sum(p.width for p in ports if p.direction == "input")
+        if args.num_cases is None and in_bits > MAX_EXHAUSTIVE_INPUT_BITS:
+            sys.exit(f"error: {in_bits} input bits means {2 ** in_bits} permutations; "
+                     f"use -n N to generate N blank cases instead")
+        text = render(module, ports, args.num_cases)
 
     out_path = args.test_dir / chapter_name / f"test_{module}.v"
     if out_path.exists() and not args.force:
         sys.exit(f"error: {out_path} already exists (use --force to overwrite)")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(render(module, ports, args.num_cases))
+    out_path.write_text(text)
     print(f"wrote {out_path.relative_to(REPO_ROOT) if out_path.is_relative_to(REPO_ROOT) else out_path}")
     return 0
 

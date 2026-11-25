@@ -14,6 +14,7 @@ module tb_not_gate;
 	);
 
 	initial begin
+		$timeformat(-9, 0, " ns", 8);
 		// Print the header for the truth table
 		$display("Time | in | out");
 		$display("---------------");
@@ -21,18 +22,18 @@ module tb_not_gate;
 		// Test case 1: input 0 (output should be 1)
 		tb_in = 1'b0;
 		#10
-		$display("%4t | %b | %b", $time, tb_in, tb_out);
+		$display("%0t | %b | %b", $time, tb_in, tb_out);
 		if (tb_out !== 1'b1) begin
-			$display("[FAIL] In: 0 | Expected: 1 | Got: %b", tb_out);
+			$display("[FAIL @ %0t] In: 0 | Expected: 1 | Got: %b", $time, tb_out);
 			error_occurred = 1;
 		end
 
 		// Test case 2: input 1 (output should be 0)
 		tb_in = 1'b1;
 		#10
-		$display("%4t | %b | %b", $time, tb_in, tb_out);
+		$display("%0t | %b | %b", $time, tb_in, tb_out);
 		if (tb_out !== 1'b0) begin
-			$display("[FAIL] In: 1 | Expected: 0 | Got: %b", tb_out);
+			$display("[FAIL @ %0t] In: 1 | Expected: 0 | Got: %b", $time, tb_out);
 			error_occurred = 1;
 		end
 

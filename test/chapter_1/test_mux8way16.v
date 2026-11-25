@@ -52,9 +52,9 @@ module test_mux8way16;
             test_sel = sel_val;
             #10;
 
-            $display("%4t | %h | %h | %h | %h | %h | %h | %h | %h | %b | %h", $time, test_a, test_b, test_c, test_d, test_e, test_f, test_g, test_h, test_sel, test_out);
+            $display("%0t | %h | %h | %h | %h | %h | %h | %h | %h | %b | %h", $time, test_a, test_b, test_c, test_d, test_e, test_f, test_g, test_h, test_sel, test_out);
             if (test_out !== expected_out) begin
-                $display("[FAIL] a: %h | b: %h | c: %h | d: %h | e: %h | f: %h | g: %h | h: %h | sel: %b | Expected out: %h | Got: %h", test_a, test_b, test_c, test_d, test_e, test_f, test_g, test_h, test_sel, expected_out, test_out);
+                $display("[FAIL @ %0t] a: %h | b: %h | c: %h | d: %h | e: %h | f: %h | g: %h | h: %h | sel: %b | Expected out: %h | Got: %h", $time, test_a, test_b, test_c, test_d, test_e, test_f, test_g, test_h, test_sel, expected_out, test_out);
                 error_occurred = 1;
             end
         end
@@ -62,6 +62,7 @@ module test_mux8way16;
 
     // actual code running the tasks to do the test cases
     initial begin
+        $timeformat(-9, 0, " ns", 8);
         // Print the header for the results table
         $display("Time | a | b | c | d | e | f | g | h | sel | out");
         $display("------------------------------------------------");

@@ -33,9 +33,9 @@ module test_dmux4way;
             test_sel = sel_val;
             #10;
 
-            $display("%4t | %b | %b | %b | %b | %b | %b", $time, test_in, test_sel, test_a, test_b, test_c, test_d);
+            $display("%0t | %b | %b | %b | %b | %b | %b", $time, test_in, test_sel, test_a, test_b, test_c, test_d);
             if (test_a !== expected_a || test_b !== expected_b || test_c !== expected_c || test_d !== expected_d) begin
-                $display("[FAIL] in: %b | sel: %b | Expected a: %b | Got: %b | Expected b: %b | Got: %b | Expected c: %b | Got: %b | Expected d: %b | Got: %b", test_in, test_sel, expected_a, test_a, expected_b, test_b, expected_c, test_c, expected_d, test_d);
+                $display("[FAIL @ %0t] in: %b | sel: %b | Expected a: %b | Got: %b | Expected b: %b | Got: %b | Expected c: %b | Got: %b | Expected d: %b | Got: %b", $time, test_in, test_sel, expected_a, test_a, expected_b, test_b, expected_c, test_c, expected_d, test_d);
                 error_occurred = 1;
             end
         end
@@ -43,6 +43,7 @@ module test_dmux4way;
 
     // actual code running the tasks to do the test cases
     initial begin
+        $timeformat(-9, 0, " ns", 8);
         // Print the header for the results table
         $display("Time | in | sel | a | b | c | d");
         $display("-------------------------------");
