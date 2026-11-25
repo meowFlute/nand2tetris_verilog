@@ -9,6 +9,7 @@ module add16 (
 
     /* first bit doesn't have an incoming carry bit and can be a half-adder */
     half_adder lsb_add (.a(a[0]), .b(b[0]), .sum(out[0]), .carry(c[0]));
+    
     /* the following bits all follow a similar format and can be generated
      * full-adders using a for loop */
     generate
