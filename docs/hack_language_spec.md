@@ -123,3 +123,65 @@ and can be used anywhere in the assembly program, even before the line in which 
 ### Variable Symbols:
 Any user-defined symbol `Xxx` appearing in an assembly program that is not predefined and is not defined elsewhere using the `(Xxx)` command is treated as a *variable*, and is assigned a unique memory address by the assembler, starting with RAM address 16 (0x0010).
 
+## Input/Output Handling
+The screen an keyboard are memory mapped to predefined locations. Pixels are a read/write bit, keyboard keys are a read-only RAM bit.
+
+### Screen
+The screen is black and white `1 = black`, `0 = white`, organized in 256 rows of 512 pixels per row. It is represented as an 8K memory map that starts at memory
+address 16384 (0x4000). Each row starting in the top left corner is represented by 32 consecutive 16-bit words. It counts from LSB to MSB.
+
+A formula for the pixel location is:
+
+```
+RAM[16384 + r*32 + c/16]    // the register address containing the pixel at row r from the top and column c from the left
+c%16                        // the bit within the register
+```
+
+an example of setting the address and then manipulating a bit that uses the predefined symbol `SCREEN` would be as follows:
+
+```
+@SCREEN     // Set the A register to 0x4000 (the top-left-most pixel)
+M=1         // Set the top-left-most pixel black (Memory[0x4000] to 1)
+```
+
+### Keyboard
+The keyboard is mapped to a single word at address 24576 (0x6000). Whenever a key is pressed on the physical keyboard, a 16-bit ASCII
+code appears in RAM[24576]. When no key is pressed it is all zeros. In addition to the usual ASCII codes, the hack keyboard also recognizes
+the following keys:
+
+| Key Pressed | Code |
+|-------------|------|
+| newline     | 128  |
+| backspace   | 129  |
+| left arrow  | 130  |
+| up arrow    | 131  |
+| right arrow | 132  |
+| down arrow  | 133  |
+| home        | 134  |
+| end         | 135  |
+| page up     | 136  |
+| page down   | 137  |
+| insert      | 138  |
+| delete      | 139  |
+| esc         | 140  |
+| f1-f12      | 141-152 |
+
+## Syntax and File Format
+
+### Binary Code Files
+binary files are ASCII where each command is 16-bits on a row (1s or 0s), and the implicit program memory address is the row of the file (starting at 0). 
+
+### Constants and Symbols
+*Constants* must be non-negative and are always written in decimal notation (not hexidecimal).
+
+A user-defined *Symbol* can be any sequence of letters, digits, underscore "\_", dot ".", dollar sign "$", and colon ":" that does not begin with a digit
+
+### Comments 
+Text beginning with two slashes and ending at the end of the line is a comment
+
+### White Space
+White space is ignored
+
+### Case convention
+All assembly mnemonics are uppercase. The rest is case sensitive (labels, user-defined symbols, etc.) The convention is to use
+uppercase for labels and lowercase for variable names
