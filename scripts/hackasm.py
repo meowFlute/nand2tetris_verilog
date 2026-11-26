@@ -14,6 +14,7 @@ Instruction formats (see hack_language_spec.md):
 """
 
 import argparse
+import os
 import re
 import sys
 
@@ -94,10 +95,11 @@ def encode_c(code):
 def assemble(lines, filename='<input>'):
     """Two-pass assemble.
 
-    Returns (rows, symbols, errors).
-      rows    -- list of ('label', name) / ('instr', addr, word, code)
-      symbols -- dict of user symbols (labels + variables) -> value
-      errors  -- list of formatted error strings (empty on success)
+    Returns (rows, labels, variables, errors).
+      rows      -- list of ('label', name) / ('instr', addr, word, code, lineno)
+      labels    -- dict label name -> ROM address
+      variables -- dict variable name -> RAM address
+      errors    -- list of formatted error strings (empty on success)
     """
     errors = []
 
@@ -166,12 +168,12 @@ def assemble(lines, filename='<input>'):
         except ValueError as e:
             err(lineno, str(e), raw)
             word = 0
-        rows.append(('instr', addr, word, code))
+        rows.append(('instr', addr, word, code, lineno))
         addr += 1
 
-    symbols = {k: v[0] for k, v in labels.items()}
-    symbols.update(variables)
-    return rows, symbols, [e for _, e in sorted(errors, key=lambda e: e[0])]
+    label_addrs = {k: v[0] for k, v in labels.items()}
+    return (rows, label_addrs, variables,
+            [e for _, e in sorted(errors, key=lambda e: e[0])])
 
 
 # --------------------------------------------------------------------------
@@ -321,14 +323,50 @@ def _fmt_addr(i, width, hexa):
     return ('%0*x' if hexa else '%0*d') % (width, i)
 
 
+def write_map(path, src_path, rows, labels, variables):
+    """Write the debug map consumed by hackemu (see hackmap.h).
+
+    # hackmap 1
+    file <idx> <path relative to this map file>
+    line <rom addr> <file idx> <source line>      (one per instruction)
+    label <name> <rom addr>
+    var <name> <ram addr>
+    """
+    if src_path == '-':
+        rel = '<stdin>'
+    else:
+        base = os.path.dirname(os.path.abspath(path))
+        rel = os.path.relpath(os.path.abspath(src_path), base)
+    out = ['# hackmap 1', 'file 0 %s' % rel]
+    for r in rows:
+        if r[0] == 'instr':
+            out.append('line %d 0 %d' % (r[1], r[4]))
+    for k, v in sorted(labels.items(), key=lambda kv: (kv[1], kv[0])):
+        out.append('label %s %d' % (k, v))
+    for k, v in sorted(variables.items(), key=lambda kv: (kv[1], kv[0])):
+        out.append('var %s %d' % (k, v))
+    with open(path, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(out) + '\n')
+
+
 def cmd_asm(args):
     src = _read(args.input)
     name = 'stdin' if args.input == '-' else args.input
-    rows, symbols, errors = assemble(src, name)
+    rows, labels, variables, errors = assemble(src, name)
+    symbols = dict(labels)
+    symbols.update(variables)
     if errors:
         print('\n'.join(errors), file=sys.stderr)
         print('%d error(s); no output written.' % len(errors), file=sys.stderr)
         return 1
+
+    if args.debug or args.map:
+        map_path = args.map or (args.output + '.map' if args.output else None)
+        if not map_path:
+            print('error: --debug needs -o FILE (map goes to FILE.map) or --map FILE',
+                  file=sys.stderr)
+            return 1
+        write_map(map_path, args.input, rows, labels, variables)
 
     if args.symbols:
         for k, v in sorted(symbols.items(), key=lambda kv: (kv[1], kv[0])):
@@ -342,7 +380,7 @@ def cmd_asm(args):
             if r[0] == 'label':
                 out.append('(%s)' % r[1])
             else:
-                _, addr, word, code = r
+                _, addr, word, code, _ = r
                 out.append('%s:  %s  // %s' % (_fmt_addr(addr, width, args.hex_addr),
                                               format(word, '016b'), code))
     else:
@@ -394,6 +432,11 @@ def main(argv=None):
                    help='print the symbol table (labels and variables) to stderr')
     a.add_argument('-X', '--hex-addr', action='store_true',
                    help='hex addresses in --listing')
+    a.add_argument('-g', '--debug', action='store_true',
+                   help='also write a debug map (ROM addr -> source line, labels, '
+                        'variables) to <output>.map for hackemu')
+    a.add_argument('--map', metavar='FILE',
+                   help='write the debug map to FILE (implies --debug)')
     a.set_defaults(func=cmd_asm)
 
     d = sub.add_parser('dis', help='disassemble ascii binary (.hack)')
