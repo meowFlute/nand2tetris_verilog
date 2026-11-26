@@ -20,6 +20,8 @@ enum { RC_HALT = 0, RC_USAGE = 1, RC_MAX = 2, RC_BREAK = 3, RC_END = 4, RC_BADIN
 
 static HackMap *map;
 
+typedef struct { unsigned long long cycle; uint16_t code; } KeyEvent;
+
 static void usage(FILE *out)
 {
     fputs(
@@ -31,7 +33,9 @@ static void usage(FILE *out)
 "                       THIS, THAT, SCREEN, KBD or a map symbol; V may be negative\n"
 "                       or 0x..; repeatable\n"
 "  -b, --break A        breakpoint at a ROM address or label; repeatable\n"
-"  -k, --key N          hold key code N in RAM[KBD] for the whole run\n"
+"  -k, --key N          hold key code N in RAM[KBD] from the start\n"
+"  -K, --key-at C=N     once C instructions have executed, set RAM[KBD] to N (0 = release);\n"
+"                       repeatable, any order\n"
 "  -t, --trace          print one line per instruction, before it executes\n"
 "  -d, --dump A[:B]     print RAM[A..B] (inclusive) at exit; repeatable\n"
 "  -p, --pbm FILE       write the final screen as an ascii PBM image\n"
@@ -119,26 +123,40 @@ int main(int argc, char **argv)
     static const struct option longopts[] = {
         {"max-cycles", required_argument, 0, 'n'}, {"map", required_argument, 0, 'm'},
         {"ram", required_argument, 0, 'r'},        {"break", required_argument, 0, 'b'},
-        {"key", required_argument, 0, 'k'},        {"trace", no_argument, 0, 't'},
+        {"key", required_argument, 0, 'k'},        {"key-at", required_argument, 0, 'K'},
+        {"trace", no_argument, 0, 't'},
         {"dump", required_argument, 0, 'd'},       {"pbm", required_argument, 0, 'p'},
         {"help", no_argument, 0, 'h'},             {0, 0, 0, 0},
     };
     enum { MAXOPT = 64 };
     const char *rams[MAXOPT], *brks[MAXOPT], *dumps[MAXOPT];
-    int nram = 0, nbrk = 0, ndump = 0;
+    KeyEvent kev[MAXOPT];
+    int nram = 0, nbrk = 0, ndump = 0, nkev = 0;
     const char *mapfile = NULL, *pbm = NULL;
     unsigned long long max_cycles = 1000000;
     long key = 0;
     bool trace = false;
 
     int c;
-    while ((c = getopt_long(argc, argv, "n:m:r:b:k:td:p:h", longopts, NULL)) != -1) {
+    while ((c = getopt_long(argc, argv, "n:m:r:b:k:K:td:p:h", longopts, NULL)) != -1) {
         switch (c) {
         case 'n': max_cycles = strtoull(optarg, NULL, 10); break;
         case 'm': mapfile = optarg; break;
         case 'r': if (nram < MAXOPT) rams[nram++] = optarg; break;
         case 'b': if (nbrk < MAXOPT) brks[nbrk++] = optarg; break;
         case 'k': if (!parse_num(optarg, &key)) { usage(stderr); return RC_USAGE; } break;
+        case 'K': {
+            char *eq = strchr(optarg, '=');
+            long code;
+            if (!eq || nkev >= MAXOPT || !parse_num(eq + 1, &code) || code < 0 || code > 0xFFFF) {
+                fprintf(stderr, "error: --key-at expects CYCLE=CODE, got '%s'\n", optarg);
+                return RC_USAGE;
+            }
+            kev[nkev].cycle = strtoull(optarg, NULL, 10);
+            kev[nkev].code = (uint16_t)code;
+            nkev++;
+            break;
+        }
         case 't': trace = true; break;
         case 'd': if (ndump < MAXOPT) dumps[ndump++] = optarg; break;
         case 'p': pbm = optarg; break;
@@ -174,18 +192,32 @@ int main(int argc, char **argv)
     }
     hack_set_key(h, (uint16_t)key);
 
+    /* key events, ascending by cycle (stable insertion sort) */
+    for (int i = 1; i < nkev; i++) {
+        KeyEvent e = kev[i];
+        int j = i - 1;
+        while (j >= 0 && kev[j].cycle > e.cycle) { kev[j + 1] = kev[j]; j--; }
+        kev[j + 1] = e;
+    }
+    int ke = 0;
+
     HackStatus st;
-    if (trace) {
-        for (;;) {
-            if (h->cycles >= max_cycles) { st = HACK_STOP_MAX; break; }
+    for (;;) {
+        while (ke < nkev && kev[ke].cycle <= h->cycles) hack_set_key(h, kev[ke++].code);
+        if (h->cycles >= max_cycles) { st = HACK_STOP_MAX; break; }
+        if (trace) {
             if (h->pc >= h->rom_len) { st = HACK_STOP_END; break; }
             trace_line(h);
             st = hack_step(h);
             if (st != HACK_OK) break;
             if (hack_has_bp(h, h->pc)) { st = HACK_STOP_BREAK; break; }
+        } else {
+            /* run up to the next key event (or the cycle limit) */
+            unsigned long long limit = max_cycles;
+            if (ke < nkev && kev[ke].cycle < limit) limit = kev[ke].cycle;
+            st = hack_run(h, limit - h->cycles);
+            if (st != HACK_STOP_MAX) break;       /* halt, breakpoint or error */
         }
-    } else {
-        st = hack_run(h, max_cycles);
     }
 
     for (int i = 0; i < ndump; i++) {

@@ -1,6 +1,6 @@
 CC      ?= gcc
 CFLAGS  ?= -O2 -g -std=c11 -Wall -Wextra
-# hackasm.py lives next to this directory by default
+# the assembler lives in the repo-level scripts/ directory
 HACKASM ?= $(abspath ../scripts/hackasm.py)
 
 all: hackemu
@@ -11,8 +11,10 @@ hackemu: hackemu.o hack.o hackmap.o
 %.o: %.c hack.h hackmap.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 
+TESTFLAGS ?=
+
 test: hackemu
-	HACKASM=$(HACKASM) python3 tests/test_emu.py
+	HACKASM=$(HACKASM) python3 -m unittest discover -s tests $(TESTFLAGS)
 
 clean:
 	rm -f hackemu *.o

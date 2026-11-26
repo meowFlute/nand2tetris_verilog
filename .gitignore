@@ -2,3 +2,5 @@
 build/
 *.vcd
 *__pycache__*
+emulator/*.o
+emulator/hackemu
