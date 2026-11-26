@@ -11,10 +11,6 @@ Use '-' as the input file to read from stdin.  Output goes to stdout unless
 Instruction formats (see hack_language_spec.md):
   A-instruction   0vvv vvvv vvvv vvvv
   C-instruction   111a cccc ccdd djjj
-
-NOTE: the compute table in the spec lists D-1 as 001111 (same as -D) and D&A
-as 000010 (same as D+A).  Those are typos; this tool uses the standard Hack
-encodings D-1 = 001110 and D&A = 000000.
 """
 
 import argparse
