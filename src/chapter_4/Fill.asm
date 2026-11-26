@@ -44,7 +44,7 @@
 
 // call SET_SCREEN with ARG set to 65535 (0xFFFF) (all 1's)
 (BLACKEN_SCREEN)
-    @ARG        // load ARG address into A
-    M=-1        // -1 in 2's compiliment should be all 1's
+    @ARG                // load ARG address into A
+    M=-1                // -1 in 2's compiliment should be all 1's
     @SET_SCREEN
     0;JMP       
