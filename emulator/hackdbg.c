@@ -20,14 +20,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <time.h>
 
 /* ---------------------------------------------------------------- config */
 
-#define CONTINUE_CHUNK 10000      /* instructions per UI refresh in continue */
-#define MSG_MAX        128        /* ring buffer of command output lines      */
-#define MSG_LEN        256
-#define HIST_MAX       64         /* command history depth                    */
-#define CMD_LEN        256
+#define CONTINUE_CHUNK   10000    /* instructions per poll/check chunk        */
+#define LIVE_KEY_HOLD_MS 350      /* auto-release live key after idle ms      */
+#define MSG_MAX          128      /* ring buffer of command output lines      */
+#define MSG_LEN          256
+#define HIST_MAX         64       /* command history depth                    */
+#define CMD_LEN          256
+#define MAX_WATCH        64       /* maximum RAM watchpoints                  */
 
 /* ---------------------------------------------------------------- colors */
 
@@ -177,22 +180,43 @@ static SrcFile *find_source(const char *path)
 static Hack    *cpu;
 static HackMap *map;
 
-/* Previous register snapshot for change highlighting */
+/* Previous register & RAM snapshot for change highlighting */
 static struct {
-    uint16_t pc, a, d, m;
+    uint16_t pc, a, d, m, kbd;
     uint16_t r[16];           /* R0..R15 (R0..R4 = SP, LCL, ARG, THIS, THAT) */
     uint64_t cycles;
 } prev;
+static uint16_t prev_ram[HACK_RAM_WORDS];
 
 static void save_prev(void)
 {
-    prev.pc = cpu->pc;
-    prev.a  = cpu->a;
-    prev.d  = cpu->d;
-    prev.m  = (cpu->a <= HACK_KBD) ? cpu->ram[cpu->a] : 0;
+    prev.pc  = cpu->pc;
+    prev.a   = cpu->a;
+    prev.d   = cpu->d;
+    prev.m   = (cpu->a <= HACK_KBD) ? cpu->ram[cpu->a] : 0;
+    prev.kbd = cpu->ram[HACK_KBD];
     for (int i = 0; i < 16; i++) prev.r[i] = cpu->ram[i];
     prev.cycles = cpu->cycles;
+    memcpy(prev_ram, cpu->ram, sizeof prev_ram);
 }
+
+/* RAM watchpoints */
+typedef struct {
+    uint16_t addr;
+    uint16_t last_val;
+    char     label[64];
+} Watchpoint;
+
+static Watchpoint watches[MAX_WATCH];
+static int        nwatches;
+
+/* RAM pane & Screen pane state */
+static uint16_t ram_view_addr;
+static uint32_t last_scr_gen = UINT32_MAX;
+static bool     show_src = true;
+static bool     show_ram = true;
+enum { SCR_AUTO = 0, SCR_OFF, SCR_ON, SCR_ZOOM };
+static int      scr_mode = SCR_AUTO;
 
 /* Command messages ring buffer */
 static char msgbuf[MSG_MAX][MSG_LEN];
@@ -229,7 +253,7 @@ typedef struct {
     int y, x, h, w;
 } Pane;
 
-static Pane reg_pane, rom_pane, src_pane, cmd_pane;
+static Pane reg_pane, rom_pane, src_pane, ram_pane, scr_pane, cmd_pane;
 static bool has_colors_;
 
 static void pane_create(Pane *p, int h, int w, int y, int x)
@@ -251,14 +275,25 @@ static void draw_title(Pane *p, const char *title)
     wattroff(p->win, A_REVERSE);
 }
 
+/* Pick the smallest integer downscale s >= 1 whose braille screen fits in w x h */
+static int screen_scale_for(int avail_w, int avail_h)
+{
+    for (int s = 1; s <= 16; s++) {
+        int bw = (HACK_SCREEN_W + 2 * s - 1) / (2 * s);
+        int bh = (HACK_SCREEN_H + 4 * s - 1) / (4 * s);
+        if (bw <= avail_w && bh <= avail_h) return s;
+    }
+    return 16;
+}
+
 static void do_layout(void)
 {
     int rows = LINES, cols = COLS;
 
     int reg_h = (rows >= 18) ? 4 : 3;    /* title + 2 or 3 register lines */
-    int cmd_h = rows / 4;
+    int cmd_h = rows / 5;
     if (cmd_h < 6) cmd_h = 6;
-    if (cmd_h > 12) cmd_h = 12;
+    if (cmd_h > 10) cmd_h = 10;
     int mid_h = rows - reg_h - cmd_h;
     if (mid_h < 4) {
         cmd_h = rows - reg_h - 4;
@@ -267,19 +302,74 @@ static void do_layout(void)
         if (mid_h < 2) mid_h = 2;
     }
 
-    int rom_w = cols * 46 / 100;
-    if (rom_w < 48) rom_w = 48;
-    int src_w = cols - rom_w;
-    /* collapse source pane on narrow terminals */
-    if (cols < 78 || src_w < 28) {
-        rom_w = cols;
-        src_w = 0;
+    int rom_w = 0, src_w = 0, right_w = 0, ram_h = 0, scr_h = 0;
+    bool want_scr = (scr_mode == SCR_ON || scr_mode == SCR_ZOOM ||
+                     (scr_mode == SCR_AUTO && cols >= 120 && rows >= 28));
+
+    if (scr_mode == SCR_ZOOM && cols >= 40 && mid_h >= 6) {
+        /* Zoomed screen fills the middle area (with ROM beside it on ultra-wide) */
+        if (cols >= 180) {
+            rom_w = 50;
+            right_w = cols - rom_w;
+        } else {
+            right_w = cols;
+        }
+        scr_h = mid_h;
+    } else {
+        rom_w = cols * 42 / 100;
+        if (rom_w < 48) rom_w = 48;
+        if (rom_w > 58) rom_w = 58;
+        if (rom_w > cols) rom_w = cols;
+
+        if (want_scr) {
+            if (cols >= 152)      right_w = 66;  /* 64x16 braille (1:4) */
+            else if (cols >= 100) right_w = 46;  /* 43x11 braille (1:6) */
+            else if (cols >= 78 && scr_mode == SCR_ON) right_w = cols / 2;
+            else want_scr = false;
+        }
+        if (!want_scr && show_ram && cols >= 82)
+            right_w = (cols >= 120) ? 36 : 32;
+
+        /* Ensure ROM + right column fit cleanly */
+        if (rom_w + right_w > cols) {
+            if (cols >= 78) rom_w = cols - right_w;
+            else { right_w = 0; want_scr = false; rom_w = cols; }
+        }
+
+        int rem = cols - rom_w - right_w;
+        if (show_src && rem >= 24) {
+            src_w = rem;
+        } else {
+            /* Collapse source pane; give slack to ROM */
+            src_w = 0;
+            rom_w = cols - right_w;
+        }
+
+        if (right_w > 0) {
+            if (want_scr && show_ram) {
+                int s = screen_scale_for(right_w - 2, mid_h / 2 + 2);
+                int bh = (HACK_SCREEN_H + 4 * s - 1) / (4 * s);
+                scr_h = bh + 1;
+                if (scr_h > mid_h - 5) scr_h = mid_h / 2;
+                if (scr_h < 4) scr_h = 0;
+                ram_h = mid_h - scr_h;
+            } else if (want_scr) {
+                scr_h = mid_h;
+                ram_h = 0;
+            } else if (show_ram) {
+                ram_h = mid_h;
+                scr_h = 0;
+            }
+        }
     }
 
     pane_create(&reg_pane, reg_h, cols, 0, 0);
     pane_create(&rom_pane, mid_h, rom_w, reg_h, 0);
     pane_create(&src_pane, mid_h, src_w, reg_h, rom_w);
+    pane_create(&ram_pane, ram_h, right_w, reg_h, rom_w + src_w);
+    pane_create(&scr_pane, scr_h, right_w, reg_h + ram_h, rom_w + src_w);
     pane_create(&cmd_pane, cmd_h, cols, reg_h + mid_h, 0);
+    last_scr_gen = UINT32_MAX;  /* force screen redraw after layout */
 }
 
 /* -------------------------------------------------------- drawing helpers */
@@ -331,7 +421,13 @@ static void draw_registers(void)
         bool next_jmp = ((uint32_t)cpu->pc + 1 < cpu->rom_len) &&
                         is_jump_instr(cpu->rom[cpu->pc + 1]);
         disasm(cpu->rom[cpu->pc], dis_buf, sizeof dis_buf, map, next_jmp);
-        mvwprintw(p->win, 1, 63, "| %.*s", p->w - 65, dis_buf);
+        mvwprintw(p->win, 1, 63, "| %-14.*s", p->w - 65, dis_buf);
+    }
+
+    /* show KBD when a key is active or changed */
+    if ((cpu->ram[HACK_KBD] != 0 || prev.kbd != 0) && 82 < p->w) {
+        draw_reg(p->win, p->w, 1, 80, "KBD",
+                 (int16_t)cpu->ram[HACK_KBD], (int16_t)prev.kbd);
     }
 
     static const char *rn[16] = {
@@ -600,11 +696,169 @@ static void draw_cmd(void)
     wnoutrefresh(p->win);
 }
 
+static int watch_find(uint16_t addr)
+{
+    for (int i = 0; i < nwatches; i++)
+        if (watches[i].addr == addr) return i;
+    return -1;
+}
+
+static const char *ram_sym_name(uint16_t a, char *tmp, size_t tmplen)
+{
+    static const char *pre5[] = { "SP", "LCL", "ARG", "THIS", "THAT" };
+    if (a < 5) return pre5[a];
+    if (a < 16) { snprintf(tmp, tmplen, "R%u", a); return tmp; }
+    if (map) {
+        const char *var = hackmap_var_at(map, a);
+        if (var) return var;
+    }
+    if (a == HACK_SCREEN) return "SCREEN";
+    if (a == HACK_KBD)    return "KBD";
+    return "";
+}
+
+/* ---- RAM pane ---- */
+static void draw_ram(void)
+{
+    Pane *p = &ram_pane;
+    if (!p->win || p->w <= 0 || p->h <= 0) return;
+    werase(p->win);
+
+    char title[64];
+    snprintf(title, sizeof title, "RAM @%u", ram_view_addr);
+    draw_title(p, title);
+
+    int visible = p->h - 1;
+    for (int row = 0; row < visible; row++) {
+        uint32_t addr32 = (uint32_t)ram_view_addr + (uint32_t)row;
+        if (addr32 > HACK_KBD) break;
+        uint16_t a = (uint16_t)addr32;
+        int y = row + 1;
+
+        bool watched = (watch_find(a) >= 0);
+        bool written = (cpu->wr.valid && cpu->wr.addr == a);
+        bool changed = (cpu->ram[a] != prev_ram[a]);
+
+        if (watched) {
+            if (has_colors_) wattron(p->win, COLOR_PAIR(CP_BREAKPT) | A_BOLD);
+            mvwaddch(p->win, y, 1, 'W');
+            if (has_colors_) wattroff(p->win, COLOR_PAIR(CP_BREAKPT) | A_BOLD);
+        } else if (written) {
+            if (has_colors_) wattron(p->win, COLOR_PAIR(CP_CHANGED) | A_BOLD);
+            mvwaddch(p->win, y, 1, '>');
+            if (has_colors_) wattroff(p->win, COLOR_PAIR(CP_CHANGED) | A_BOLD);
+        }
+
+        if (changed && has_colors_)
+            wattron(p->win, COLOR_PAIR(CP_CHANGED) | A_BOLD);
+        else if (changed)
+            wattron(p->win, A_BOLD);
+
+        char tmp[16];
+        const char *sym = ram_sym_name(a, tmp, sizeof tmp);
+        int16_t sv = (int16_t)cpu->ram[a];
+        if (p->w >= 34) {
+            mvwprintw(p->win, y, 3, "%5u %-8.8s %6d %04X",
+                      a, sym, sv, cpu->ram[a]);
+        } else if (p->w >= 24) {
+            mvwprintw(p->win, y, 3, "%5u %-5.5s %6d", a, sym, sv);
+        } else {
+            mvwprintw(p->win, y, 3, "%5u %6d", a, sv);
+        }
+
+        wattroff(p->win, COLOR_PAIR(CP_CHANGED) | A_BOLD);
+    }
+
+    wnoutrefresh(p->win);
+}
+
+/* ---- Screen pane (Unicode braille, U+2800..U+28FF) ---- */
+static void draw_screen(void)
+{
+    Pane *p = &scr_pane;
+    if (!p->win || p->w < 6 || p->h < 3) return;
+    werase(p->win);
+
+    int avail_w = p->w - 2;
+    int avail_h = p->h - 1;
+    int s = screen_scale_for(avail_w, avail_h);
+    int bw = (HACK_SCREEN_W + 2 * s - 1) / (2 * s);
+    int bh = (HACK_SCREEN_H + 4 * s - 1) / (4 * s);
+
+    char title[64];
+    if (cpu->ram[HACK_KBD])
+        snprintf(title, sizeof title, "Screen 1:%d [KBD:%u]", s, cpu->ram[HACK_KBD]);
+    else
+        snprintf(title, sizeof title, "Screen 512x256 (1:%d)", s);
+    draw_title(p, title);
+
+    static const uint8_t braille_dot[4][2] = {
+        {0x01, 0x08},
+        {0x02, 0x10},
+        {0x04, 0x20},
+        {0x40, 0x80},
+    };
+
+    int x0 = 1 + (avail_w - bw) / 2;
+    bool border = (x0 >= 1 && x0 + bw < p->w);
+    if (border) {
+        wattron(p->win, A_DIM);
+        for (int cy = 0; cy < bh && 1 + cy < p->h; cy++) {
+            mvwaddch(p->win, 1 + cy, x0 - 1, ACS_VLINE);
+            mvwaddch(p->win, 1 + cy, x0 + bw, ACS_VLINE);
+        }
+        if (1 + bh < p->h) {
+            mvwaddch(p->win, 1 + bh, x0 - 1, ACS_LLCORNER);
+            for (int cx = 0; cx < bw; cx++) mvwaddch(p->win, 1 + bh, x0 + cx, ACS_HLINE);
+            mvwaddch(p->win, 1 + bh, x0 + bw, ACS_LRCORNER);
+        }
+        wattroff(p->win, A_DIM);
+    }
+
+    for (int cy = 0; cy < bh && 1 + cy < p->h; cy++) {
+        char line[256 * 3 + 1];
+        int pos = 0;
+        for (int cx = 0; cx < bw && pos + 4 < (int)sizeof line; cx++) {
+            uint8_t mask = 0;
+            for (int dy = 0; dy < 4; dy++) {
+                int py0 = (cy * 4 + dy) * s;
+                if (py0 >= HACK_SCREEN_H) break;
+                for (int dx = 0; dx < 2; dx++) {
+                    int px0 = (cx * 2 + dx) * s;
+                    if (px0 >= HACK_SCREEN_W) continue;
+                    bool on = false;
+                    for (int sy = 0; sy < s && !on && py0 + sy < HACK_SCREEN_H; sy++) {
+                        for (int sx = 0; sx < s && px0 + sx < HACK_SCREEN_W; sx++) {
+                            if (hack_pixel(cpu, px0 + sx, py0 + sy)) { on = true; break; }
+                        }
+                    }
+                    if (on) mask |= braille_dot[dy][dx];
+                }
+            }
+            if (mask == 0) {
+                line[pos++] = ' ';
+            } else {
+                unsigned cp = 0x2800u | mask;
+                line[pos++] = (char)(0xE0 | (cp >> 12));
+                line[pos++] = (char)(0x80 | ((cp >> 6) & 0x3F));
+                line[pos++] = (char)(0x80 | (cp & 0x3F));
+            }
+        }
+        line[pos] = '\0';
+        mvwaddstr(p->win, 1 + cy, x0, line);
+    }
+
+    last_scr_gen = cpu->screen_gen;
+    wnoutrefresh(p->win);
+}
+
 static void draw_all(void)
 {
     draw_registers();
     draw_rom();
     draw_source();
+    draw_ram();
+    draw_screen();
     draw_cmd();
     doupdate();
 }
@@ -650,6 +904,70 @@ static bool resolve_addr(const char *s, uint16_t *out)
 
 /* ------------------------------------------------- command handlers      */
 
+typedef struct {
+    bool     hit;
+    uint16_t addr, old_val, new_val;
+    char     label[64];
+} WatchHit;
+
+static bool check_watch(WatchHit *wh)
+{
+    if (!nwatches || !cpu->wr.valid || cpu->wr.val == cpu->wr.old) return false;
+    int idx = watch_find(cpu->wr.addr);
+    if (idx < 0) return false;
+    watches[idx].last_val = cpu->wr.val;
+    if (wh) {
+        wh->hit = true;
+        wh->addr = cpu->wr.addr;
+        wh->old_val = cpu->wr.old;
+        wh->new_val = cpu->wr.val;
+        snprintf(wh->label, sizeof wh->label, "%s", watches[idx].label);
+    }
+    return true;
+}
+
+static HackStatus run_with_watch(uint64_t max_steps, WatchHit *wh)
+{
+    for (uint64_t i = 0; i < max_steps; i++) {
+        HackStatus st = hack_step(cpu);
+        if (st != HACK_OK) return st;
+        if (check_watch(wh)) return HACK_OK;
+        if (hack_has_bp(cpu, cpu->pc)) return HACK_STOP_BREAK;
+    }
+    return HACK_STOP_MAX;
+}
+
+static long long now_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
+static uint16_t map_ncurses_key(int ch)
+{
+    if (ch >= 32 && ch <= 126) return (uint16_t)ch;
+    switch (ch) {
+    case '\n': case '\r': case KEY_ENTER: return 128;
+    case KEY_BACKSPACE: case 127: case 8: return 129;
+    case KEY_LEFT:  return 130;
+    case KEY_UP:    return 131;
+    case KEY_RIGHT: return 132;
+    case KEY_DOWN:  return 133;
+    case KEY_HOME:  return 134;
+    case KEY_END:   return 135;
+    case KEY_PPAGE: return 136;
+    case KEY_NPAGE: return 137;
+    case KEY_IC:    return 138;
+    case KEY_DC:    return 139;
+    case 27:        return 140;
+    default:
+        if (ch >= KEY_F(1) && ch <= KEY_F(12))
+            return (uint16_t)(141 + (ch - KEY_F(1)));
+        return 0;
+    }
+}
+
 static void cmd_step(const char *arg)
 {
     int n = 1;
@@ -662,16 +980,23 @@ static void cmd_step(const char *arg)
         n = (int)v;
     }
     HackStatus st = HACK_OK;
+    WatchHit wh = {0};
     for (int i = 0; i < n; i++) {
         st = hack_step(cpu);
         if (st != HACK_OK) break;
+        if (check_watch(&wh)) break;
         if (i < n - 1 && hack_has_bp(cpu, cpu->pc)) {
             st = HACK_STOP_BREAK;
             break;
         }
     }
-    if (st != HACK_OK)
+    if (wh.hit) {
+        msg("watchpoint hit: RAM[%u]%s%s%s: %d -> %d at PC=%d",
+            wh.addr, wh.label[0] ? " (" : "", wh.label, wh.label[0] ? ")" : "",
+            (int16_t)wh.old_val, (int16_t)wh.new_val, cpu->pc);
+    } else if (st != HACK_OK) {
         msg("stopped: %s, PC=%d", hack_status_str(st), cpu->pc);
+    }
 }
 
 static void cmd_continue(void)
@@ -679,40 +1004,78 @@ static void cmd_continue(void)
     interrupted = 0;
     nodelay(cmd_pane.win, TRUE);
 
-    msg("running... (press any key or Ctrl-C to interrupt)");
+    msg("running... (typing forwards to KBD, Ctrl-C to interrupt)");
     draw_all();
 
     HackStatus st = HACK_STOP_MAX;
+    WatchHit wh = {0};
     bool user_break = false;
+    bool live_key_active = false;
+    long long live_key_until = 0;
+    long long last_draw = now_ms();
+
     while (1) {
-        st = hack_run(cpu, CONTINUE_CHUNK);
-        if (st != HACK_STOP_MAX) break;
+        st = nwatches ? run_with_watch(CONTINUE_CHUNK, &wh)
+                      : hack_run(cpu, CONTINUE_CHUNK);
+        if (wh.hit || st != HACK_STOP_MAX) break;
         if (interrupted) { user_break = true; break; }
-        int ch = wgetch(cmd_pane.win);
-        if (ch == KEY_RESIZE) {
-            do_layout();
-            nodelay(cmd_pane.win, TRUE);
-            draw_all();
-            continue;
+
+        int ch;
+        while ((ch = wgetch(cmd_pane.win)) != ERR) {
+            if (ch == 3) { user_break = true; break; }
+            if (ch == KEY_RESIZE) {
+                do_layout();
+                nodelay(cmd_pane.win, TRUE);
+                draw_all();
+                last_draw = now_ms();
+                continue;
+            }
+            uint16_t k = map_ncurses_key(ch);
+            if (k) {
+                hack_set_key(cpu, k);
+                live_key_active = true;
+                live_key_until = now_ms() + LIVE_KEY_HOLD_MS;
+            }
         }
-        if (ch != ERR) { user_break = true; break; }
-        draw_registers();
-        doupdate();
+        if (user_break || interrupted) { user_break = true; break; }
+
+        long long t = now_ms();
+        if (live_key_active && t >= live_key_until) {
+            hack_set_key(cpu, 0);
+            live_key_active = false;
+        }
+        if (t - last_draw >= 33) {
+            draw_registers();
+            draw_ram();
+            if (cpu->screen_gen != last_scr_gen) draw_screen();
+            doupdate();
+            last_draw = t;
+        }
     }
 
+    if (live_key_active) hack_set_key(cpu, 0);
     nodelay(cmd_pane.win, FALSE);
     interrupted = 0;
-    if (user_break)
+
+    if (wh.hit) {
+        msg("watchpoint hit: RAM[%u]%s%s%s: %d -> %d at PC=%d, Cycles=%llu",
+            wh.addr, wh.label[0] ? " (" : "", wh.label, wh.label[0] ? ")" : "",
+            (int16_t)wh.old_val, (int16_t)wh.new_val, cpu->pc,
+            (unsigned long long)cpu->cycles);
+    } else if (user_break) {
         msg("interrupted at PC=%d, Cycles=%llu",
             cpu->pc, (unsigned long long)cpu->cycles);
-    else
+    } else {
         msg("stopped: %s, PC=%d, Cycles=%llu",
             hack_status_str(st), cpu->pc, (unsigned long long)cpu->cycles);
+    }
 }
 
 static void cmd_reset(void)
 {
     hack_reset(cpu);
+    for (int i = 0; i < nwatches; i++)
+        watches[i].last_val = cpu->ram[watches[i].addr];
     save_prev();
     msg("CPU reset");
 }
@@ -881,20 +1244,148 @@ static void cmd_set(const char *arg)
     msg("unknown register or address '%s'", lhs);
 }
 
+static void cmd_watch(const char *arg)
+{
+    if (!arg || !*arg) {
+        if (!nwatches) { msg("no watchpoints set"); return; }
+        for (int i = 0; i < nwatches; i++) {
+            uint16_t a = watches[i].addr;
+            msg("  watch RAM[%u]%s%s%s = %d (0x%04X)", a,
+                watches[i].label[0] ? " (" : "", watches[i].label,
+                watches[i].label[0] ? ")" : "",
+                (int16_t)cpu->ram[a], cpu->ram[a]);
+        }
+        return;
+    }
+    uint16_t addr;
+    if (!resolve_addr(arg, &addr) || addr > HACK_KBD) {
+        msg("cannot resolve '%s' as a RAM address", arg);
+        return;
+    }
+    if (watch_find(addr) >= 0) {
+        msg("already watching RAM[%u]", addr);
+        return;
+    }
+    if (nwatches >= MAX_WATCH) {
+        msg("too many watchpoints (max %d)", MAX_WATCH);
+        return;
+    }
+    char tmp[16];
+    const char *sym = ram_sym_name(addr, tmp, sizeof tmp);
+    Watchpoint *w = &watches[nwatches++];
+    w->addr = addr;
+    w->last_val = cpu->ram[addr];
+    snprintf(w->label, sizeof w->label, "%s", sym);
+    msg("watchpoint set on RAM[%u]%s%s%s (currently %d)", addr,
+        sym[0] ? " (" : "", sym, sym[0] ? ")" : "", (int16_t)w->last_val);
+}
+
+static void cmd_unwatch(const char *arg)
+{
+    if (!arg || !*arg) {
+        msg("usage: unwatch <addr|sym|all>");
+        return;
+    }
+    if (!strcmp(arg, "all") || !strcmp(arg, "*")) {
+        nwatches = 0;
+        msg("all watchpoints removed");
+        return;
+    }
+    uint16_t addr;
+    if (!resolve_addr(arg, &addr) || addr > HACK_KBD) {
+        msg("cannot resolve '%s'", arg);
+        return;
+    }
+    int idx = watch_find(addr);
+    if (idx < 0) {
+        msg("no watchpoint on RAM[%u]", addr);
+        return;
+    }
+    for (int i = idx; i < nwatches - 1; i++) watches[i] = watches[i + 1];
+    nwatches--;
+    msg("watchpoint on RAM[%u] removed", addr);
+}
+
+static void cmd_ram(const char *arg)
+{
+    if (!arg || !*arg) {
+        show_ram = !show_ram;
+        do_layout();
+        msg("RAM pane %s (base=%u)", show_ram ? "shown" : "hidden", ram_view_addr);
+        return;
+    }
+    if (arg[0] == '+' || arg[0] == '-') {
+        long delta;
+        if (!parse_num(arg, &delta)) { msg("bad offset '%s'", arg); return; }
+        long next = (long)ram_view_addr + delta;
+        if (next < 0) next = 0;
+        if (next > HACK_KBD) next = HACK_KBD;
+        ram_view_addr = (uint16_t)next;
+    } else {
+        uint16_t addr;
+        if (!resolve_addr(arg, &addr) || addr > HACK_KBD) {
+            msg("cannot resolve '%s' as a RAM address", arg);
+            return;
+        }
+        ram_view_addr = addr;
+        show_ram = true;
+        do_layout();
+    }
+    msg("RAM view at %u (0x%04X)", ram_view_addr, ram_view_addr);
+}
+
+static void cmd_screen(const char *arg)
+{
+    if (!arg || !*arg) {
+        if (scr_mode == SCR_OFF)       scr_mode = SCR_ON;
+        else if (scr_mode == SCR_ON)   scr_mode = SCR_ZOOM;
+        else if (scr_mode == SCR_ZOOM) scr_mode = SCR_OFF;
+        else /* SCR_AUTO */            scr_mode = scr_pane.win ? SCR_OFF : SCR_ON;
+    } else if (!strcasecmp(arg, "on")) {
+        scr_mode = SCR_ON;
+    } else if (!strcasecmp(arg, "off")) {
+        scr_mode = SCR_OFF;
+    } else if (!strcasecmp(arg, "zoom") || !strcasecmp(arg, "big")) {
+        scr_mode = SCR_ZOOM;
+    } else if (!strcasecmp(arg, "auto")) {
+        scr_mode = SCR_AUTO;
+    } else {
+        msg("usage: scr [on|off|zoom|auto]");
+        return;
+    }
+    do_layout();
+    const char *m = scr_mode == SCR_ZOOM ? "zoom"
+                  : scr_mode == SCR_ON   ? "on"
+                  : scr_mode == SCR_OFF  ? "off" : "auto";
+    msg("screen pane: %s", m);
+}
+
+static void cmd_src(void)
+{
+    show_src = !show_src;
+    do_layout();
+    msg("source pane %s", show_src ? "shown" : "hidden");
+}
+
 static void cmd_help(void)
 {
     msg("Commands:");
-    msg("  s [N]        step N instructions (default 1)");
-    msg("  c            continue until breakpoint/halt");
-    msg("  r            reset CPU (keep ROM and breakpoints)");
-    msg("  b [addr]     set breakpoint (or list all)");
-    msg("  del <addr>   delete breakpoint (del all = clear)");
-    msg("  key <k>      set KBD (char, code, 'c', or 'off')");
-    msg("  x [/N] addr  examine RAM (e.g. x/8 R0)");
-    msg("  set reg=val  set A, D, PC, or RAM");
-    msg("  PgUp / PgDn  scroll command output");
-    msg("  q            quit");
-    msg("  Enter        repeat last command");
+    msg("  s [N]          step N instructions (default 1)");
+    msg("  c              continue (keys -> KBD, Ctrl-C breaks)");
+    msg("  r              reset CPU (keep ROM, bps, watches)");
+    msg("  b [addr]       set breakpoint (or list all)");
+    msg("  del <addr>     delete breakpoint (del all = clear)");
+    msg("  watch [addr]   watch RAM addr on change (or list)");
+    msg("  unwatch <addr> remove watchpoint (or 'all')");
+    msg("  ram [addr|+N]  jump/scroll/toggle RAM pane");
+    msg("  scr [mode]     toggle/zoom screen (on|off|zoom|auto)");
+    msg("  src            toggle Source pane");
+    msg("  key <k>        set KBD (char, code, 'c', or 'off')");
+    msg("  x [/N] addr    examine RAM (e.g. x/8 R0)");
+    msg("  set reg=val    set A, D, PC, or RAM");
+    msg("  PgUp / PgDn    scroll command output");
+    msg("  q              quit");
+    msg("  Enter          repeat last command");
 }
 
 /* less-style pager when a command produces more lines than fit in cmd_pane */
@@ -998,6 +1489,16 @@ static void execute_command(const char *line)
         cmd_break(arg);
     else if (!strcmp(cmd, "d") || !strcmp(cmd, "del") || !strcmp(cmd, "delete"))
         cmd_delete(arg);
+    else if (!strcmp(cmd, "w") || !strcmp(cmd, "watch"))
+        cmd_watch(arg);
+    else if (!strcmp(cmd, "unwatch") || !strcmp(cmd, "uw"))
+        cmd_unwatch(arg);
+    else if (!strcmp(cmd, "ram"))
+        cmd_ram(arg);
+    else if (!strcmp(cmd, "scr") || !strcmp(cmd, "screen"))
+        cmd_screen(arg);
+    else if (!strcmp(cmd, "src") || !strcmp(cmd, "source"))
+        cmd_src();
     else if (!strcmp(cmd, "key"))
         cmd_key(arg);
     else if (!strcmp(cmd, "x") || !strcmp(cmd, "examine"))
@@ -1175,6 +1676,7 @@ int main(int argc, char **argv)
     /* init curses */
     setlocale(LC_ALL, "");
     initscr();
+    set_escdelay(25);
     cbreak();
     noecho();
     intrflush(stdscr, FALSE);
