@@ -1,5 +1,8 @@
 # nand2tetris_verilog
-nand2tetris in verilog with yosys stats and visualizations! And a custom TUI-based emulator and debugger!
+nand2tetris in verilog with yosys stats and visualizations! 
+
+**BONUS**
+Now with a custom TUI-based emulator and debugger! We're going off the rails!
 
 <img width="640" height="380" alt="hackdbg_mult" src="https://github.com/user-attachments/assets/21c50be0-4f63-4e93-84d3-ae7635b59b4a" />
 
